@@ -1,0 +1,37 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Debug compute_norm_stats",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "/workspace/code/openpi/scripts/compute_norm_stats.py",
+            "args": [
+                "--config-name",
+                "pi05_qingloong_low_mem_finetune"
+            ],
+            "console": "integratedTerminal",
+            "python": "/.venv/bin/python"
+        },
+        {
+            "name": "Debug train.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "/workspace/code/openpi/scripts/train.py",
+            "args": [
+                "pi05_qingloong_low_mem_finetune",
+                "--exp-name=test0909",
+                "--overwrite"
+            ],
+            "console": "integratedTerminal",
+            "python": "/.venv/bin/python",
+            "env": {
+                "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.95"
+            },
+        }
+    ]
+}

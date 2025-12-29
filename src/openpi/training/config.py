@@ -32,6 +32,7 @@ ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
 
+import openpi.policies.qingloong_policy as qingloong_policy
 
 @dataclasses.dataclass(frozen=True)
 class AssetsConfig:
@@ -351,6 +352,106 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+        )
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotQingLoongDataConfig(DataConfigFactory):
+    use_delta_joint_actions: bool = True
+    default_prompt: str | None = None
+    action_sequence_keys: Sequence[str] = ("action",)
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # The repack transform remaps dataset keys to inference pipeline keys
+        # Based on actual dataset inspection, we need to ensure all required keys are available
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        # Map keys for QingLoong policy inputs
+                        "actions": "action",  # actions key for data transforms
+                        "observation.state": "observation.state",  # state for policy
+                        "observation.images.front": "observation.images.front",  # images for policy
+                        "observation.images.left": "observation.images.left",
+                        "observation.images.right": "observation.images.right",
+                        "prompt": "prompt",  # prompt for policy
+                    }
+                )
+            ]
+        )
+        
+        # Data transforms using QingLoong-specific policy handlers from qingloong_policy.py
+        data_transforms = _transforms.Group(
+            inputs=[qingloong_policy.QingLoongInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            outputs=[qingloong_policy.QingLoongOutputs()],
+        )
+
+        # Apply delta action conversion for joint actions
+        # QingLoong: first 14 dimensions are joints (delta), last 2 are grippers (absolute)
+        delta_action_mask = _transforms.make_bool_mask(7, -1, 7, -1)
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.DeltaActions(delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        )
+
+        # Model transforms include tokenization and image processing
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+        
+@dataclasses.dataclass(frozen=True)
+class LeRobotQingLoongRos2DataConfig(DataConfigFactory):
+    use_delta_joint_actions: bool = True
+    default_prompt: str | None = None
+    action_sequence_keys: Sequence[str] = ("action",)
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # The repack transform remaps dataset keys to inference pipeline keys
+        # Based on actual dataset inspection, we need to ensure all required keys are available
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        # Map keys for QingLoong policy inputs
+                        "actions": "action",  # actions key for data transforms
+                        "observation.state": "observation.state",  # state for policy
+                        "observation.images.front": "observation.images.head",  # images for policy
+                        "observation.images.left": "observation.images.left",
+                        "observation.images.right": "observation.images.right",
+                        "prompt": "prompt",  # prompt for policy
+                    }
+                )
+            ]
+        )
+        
+        # Data transforms using QingLoong-specific policy handlers from qingloong_policy.py
+        data_transforms = _transforms.Group(
+            inputs=[qingloong_policy.QingLoongInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            outputs=[qingloong_policy.QingLoongOutputs()],
+        )
+
+        # Apply delta action conversion for joint actions
+        # QingLoong: first 14 dimensions are joints (delta), last 2 are grippers (absolute)
+        delta_action_mask = _transforms.make_bool_mask(26, 3, -1, -1, -1, -1)
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.DeltaActions(delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        )
+
+        # Model transforms include tokenization and image processing
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
         )
 
 
@@ -960,6 +1061,37 @@ _CONFIGS = [
     # RoboArena configs.
     #
     *roboarena_config.get_roboarena_configs(),
+    TrainConfig(
+        name="pi05_qingloong_low_mem_finetune",
+        # Use LoRA variants for memory-efficient fine-tuning
+        model=pi0_config.Pi0Config(
+        pi05=True,  # 启用π₀.₅特性
+        paligemma_variant="gemma_2b_lora", 
+        action_expert_variant="gemma_300m_lora"
+     ),
+        data=LeRobotQingLoongRos2DataConfig(                    # 这个策略可以替换
+            repo_id="20251016T",  # Replace with actual repo ID    merge_labor_all_0808    merge_labor01_0808   20251016T
+            base_config=DataConfig(
+                prompt_from_task=True,
+                action_sequence_keys=("action",)  # 数据集中使用 "action" 而不是 "actions"
+            ),
+        ),
+         # 使用π₀.₅ base model权重
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        # π₀.₅推荐的训练参数
+        num_train_steps=90_000,
+        batch_size=64,  # π₀.₅可以使用更大的batch sie, 计算norm时变大
+        # LoRA freeze filter
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora", 
+            action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # PyTorch支持（π₀.₅新特性）
+        pytorch_weight_path="/root/data/pi0/model/openpi-assets/checkpoints_torch",  # 如果使用PyTorch
+        pytorch_training_precision="bfloat16",  # 或 "float32"
+        num_workers = 16,
+    ),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
