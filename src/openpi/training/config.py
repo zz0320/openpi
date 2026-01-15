@@ -33,6 +33,7 @@ ModelType: TypeAlias = _model.ModelType
 Filter: TypeAlias = nnx.filterlib.Filter
 
 import openpi.policies.qingloong_policy as qingloong_policy
+import openpi.policies.astribot_policy as astribot_policy
 
 @dataclasses.dataclass(frozen=True)
 class AssetsConfig:
@@ -446,6 +447,74 @@ class LeRobotQingLoongRos2DataConfig(DataConfigFactory):
         # Model transforms include tokenization and image processing
         model_transforms = ModelTransformFactory()(model_config)
 
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotAstribotDataConfig(DataConfigFactory):
+    """
+    Astribot S1 data config.
+    
+    Astribot S1 is a dual-arm robot with:
+    - 16-dimensional state/action (left_arm: 7, right_arm: 7, left_gripper: 1, right_gripper: 1)
+    - 4 cameras: head, wrist_left, wrist_right, torso
+    """
+    use_delta_joint_actions: bool = True
+    default_prompt: str | None = "clear up the desktop"
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Repack transform: map dataset keys to policy keys
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "actions": "action",
+                        "observation.state": "observation.state",
+                        "observation.images.head": "observation.images.head",
+                        "observation.images.wrist_left": "observation.images.wrist_left",
+                        "observation.images.wrist_right": "observation.images.wrist_right",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+        
+        # Data transforms using Astribot-specific policy handlers
+        # action_dim=25: arm_left(7) + arm_right(7) + gripper_left(1) + gripper_right(1) + head(2) + torso(4) + chassis(3)
+        data_transforms = _transforms.Group(
+            inputs=[astribot_policy.AstribotInputs(model_type=model_config.model_type, action_dim=25)],
+            outputs=[astribot_policy.AstribotOutputs(action_dim=25)],
+        )
+        
+        # Apply delta action conversion for joint actions
+        # Astribot 25-dim structure:
+        #   [0:7]   arm_left joints (delta)
+        #   [7:14]  arm_right joints (delta)
+        #   [14]    gripper_left (absolute)
+        #   [15]    gripper_right (absolute)
+        #   [16:18] head joints (delta)
+        #   [18:22] torso joints (delta)
+        #   [22:25] chassis (delta: dx, dy, dtheta)
+        if self.use_delta_joint_actions:
+            # True = delta action, False = absolute action
+            # arm_left(7 delta), gripper_left(1 abs), arm_right(7 delta), gripper_right(1 abs), head(2 delta), torso(4 delta), chassis(3 delta)
+            delta_action_mask = _transforms.make_bool_mask(7, -1, 7, -1, 2, 4, 3)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+        
+        # Model transforms include tokenization and image processing
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+        
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             repack_transforms=repack_transform,
@@ -1056,6 +1125,55 @@ _CONFIGS = [
         overwrite=True,
         exp_name="debug_pi05",
         wandb_enabled=False,
+    ),
+    #
+    # Astribot S1 configs.
+    #
+    TrainConfig(
+        name="pi05_astribot",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,  # pi0.5 uses 32-dim padded actions internally
+            action_horizon=10,
+        ),
+        data=LeRobotAstribotDataConfig(
+            repo_id="/root/astribot_raw_datasets/astribot_lerobot_v2.1",
+            default_prompt="clear up the desktop",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+    ),
+    TrainConfig(
+        name="pi05_astribot_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotAstribotDataConfig(
+            repo_id="/root/astribot_raw_datasets/astribot_lerobot_v2.1",
+            default_prompt="clear up the desktop",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                action_sequence_keys=("action",),
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=80_000,
+        batch_size=1,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,
     ),
     #
     # RoboArena configs.
