@@ -505,8 +505,8 @@ class LeRobotAstribotDataConfig(DataConfigFactory):
         #   [22:25] chassis (delta: dx, dy, dtheta)
         if self.use_delta_joint_actions:
             # True = delta action, False = absolute action
-            # arm_left(7 delta), gripper_left(1 abs), arm_right(7 delta), gripper_right(1 abs), head(2 delta), torso(4 delta), chassis(3 delta)
-            delta_action_mask = _transforms.make_bool_mask(7, -1, 7, -1, 2, 4, 3)
+            # arm_left(7 delta), arm_right(7 delta), gripper_left(1 abs), gripper_right(1 abs), head(2 delta), torso(4 delta), chassis(3 delta)
+            delta_action_mask = _transforms.make_bool_mask(7, 7, -1, -1, 2, 4, 3)
             data_transforms = data_transforms.push(
                 inputs=[_transforms.DeltaActions(delta_action_mask)],
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
@@ -1167,7 +1167,7 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=80_000,
-        batch_size=1,
+        batch_size=40,
         freeze_filter=pi0_config.Pi0Config(
             pi05=True,
             paligemma_variant="gemma_2b_lora",
